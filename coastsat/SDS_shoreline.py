@@ -113,7 +113,8 @@ def extract_shorelines(metadata, settings):
         output_geoaccuracy = []# georeferencing accuracy of the images
         output_idxkeep = []    # index that were kept during the analysis (cloudy images are skipped)
         output_t_mndwi = []    # MNDWI threshold used to map the shoreline
-        
+        output_classif = []    # classified image
+
         # load classifiers (if sklearn version above 0.20, learn the new files)
         str_new = ''
         if not sklearn.__version__[:4] == '0.20':
@@ -185,7 +186,7 @@ def extract_shorelines(metadata, settings):
             # otherwise use find_wl_contours2 (traditional)
             else:
                 try: # use try/except structure for long runs
-                    if sum(sum(im_labels[:,:,0])) < 10 : # minimum number of sand pixels
+                    if sum(im_labels[im_ref_buffer,0]) < 50: # minimum number of sand pixels
                         # compute MNDWI image (SWIR-G)
                         im_mndwi = SDS_tools.nd_index(im_ms[:,:,4], im_ms[:,:,1], cloud_mask)
                         # find water contours on MNDWI grayscale image
@@ -222,6 +223,7 @@ def extract_shorelines(metadata, settings):
             output_geoaccuracy.append(metadata[satname]['acc_georef'][i])
             output_idxkeep.append(i)
             output_t_mndwi.append(t_mndwi)
+            output_classif.append(im_classif)
 
         # create dictionnary of output
         output[satname] = {
@@ -411,11 +413,17 @@ def find_wl_contours1(im_ndwi, cloud_mask, im_ref_buffer):
         Otsu threshold used to map the contours
 
     """
-
-    # reshape image to vector
-    vec_ndwi = im_ndwi.reshape(im_ndwi.shape[0] * im_ndwi.shape[1])
-    vec_mask = cloud_mask.reshape(cloud_mask.shape[0] * cloud_mask.shape[1])
-    vec = vec_ndwi[~vec_mask]
+    nrows = cloud_mask.shape[0]
+    ncols = cloud_mask.shape[1]
+    # use im_ref_buffer and dilate it by 5 pixels
+    se = morphology.disk(5)
+    im_ref_buffer_extra = morphology.binary_dilation(im_ref_buffer,se)
+    vec_buffer = im_ref_buffer_extra.reshape(nrows*ncols)
+    # reshape spectral index image to vector
+    vec_ndwi = im_ndwi.reshape(nrows*ncols)
+    # keep pixels that are in the buffer and not in the cloud mask
+    vec_mask = cloud_mask.reshape(nrows*ncols)
+    vec = vec_ndwi[np.logical_and(vec_buffer,~vec_mask)]
     # apply otsu's threshold
     vec = vec[~np.isnan(vec)]
     t_otsu = filters.threshold_otsu(vec)
@@ -474,11 +482,12 @@ def find_wl_contours2(im_ms, im_labels, cloud_mask, buffer_size, im_ref_buffer):
     vec_sand = im_labels[:,:,0].reshape(ncols*nrows)
     vec_water = im_labels[:,:,2].reshape(ncols*nrows)
 
+    # use im_ref_buffer and dilate it by 5 pixels
+    se = morphology.disk(5)
+    im_ref_buffer_extra = morphology.binary_dilation(im_ref_buffer, se)
     # create a buffer around the sandy beach
-    se = morphology.disk(buffer_size)
-    im_buffer = morphology.binary_dilation(im_labels[:,:,0], se)
-    vec_buffer = im_buffer.reshape(nrows*ncols)
-
+    vec_buffer = im_ref_buffer_extra.reshape(nrows*ncols)
+    
     # select water/sand/swash pixels that are within the buffer
     int_water = vec_ind[np.logical_and(vec_buffer,vec_water),:]
     int_sand = vec_ind[np.logical_and(vec_buffer,vec_sand),:]
