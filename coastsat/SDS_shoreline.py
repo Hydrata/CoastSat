@@ -15,6 +15,7 @@ import pdb
 import skimage.filters as filters
 import skimage.measure as measure
 import skimage.morphology as morphology
+import skimage.transform as transform
 
 # machine learning modules
 import sklearn
@@ -32,6 +33,7 @@ from matplotlib import gridspec
 import pickle
 from datetime import datetime
 from pylab import ginput
+import shutil
 
 # CoastSat modules
 from coastsat import SDS_tools, SDS_preprocess
@@ -200,7 +202,8 @@ def extract_shorelines(metadata, settings):
                     continue
     
                 # process the water contours into a shoreline
-                shoreline = process_shoreline(contours_mwi, cloud_mask, georef, image_epsg, settings)
+                shoreline = process_shoreline(contours_mwi, cloud_mask, im_nodata,
+                                              georef, image_epsg, settings)
     
                 # visualise the mapped shorelines, there are two options:
                 # if settings['check_detection'] = True, shows the detection to the user for accept/reject
@@ -234,6 +237,7 @@ def extract_shorelines(metadata, settings):
                 'geoaccuracy': output_geoaccuracy,
                 'idx': output_idxkeep,
                 'MNDWI_threshold': output_t_mndwi,
+                'im_classif': output_classif
                 }
         print('')
 
@@ -616,34 +620,39 @@ def process_contours(contours):
     
     return contours_nonans
     
-def process_shoreline(contours, cloud_mask, georef, image_epsg, settings):
+def process_shoreline(contours, cloud_mask, im_nodata, georef, image_epsg, settings):
     """
-    Converts the contours from image coordinates to world coordinates. 
-    This function also removes the contours that are too small to be a shoreline 
-    (based on the parameter settings['min_length_sl'])
+    Converts the contours from image coordinates to world coordinates. This function also removes
+    the contours that are too small to be a shoreline (based on the parameter
+    settings['min_length_sl'])
 
     KV WRL 2018
 
     Arguments:
     -----------
-    contours: np.array or list of np.array
-        image contours as detected by the function find_contours
-    cloud_mask: np.array
-        2D cloud mask with True where cloud pixels are
-    georef: np.array
-        vector of 6 elements [Xtr, Xscale, Xshear, Ytr, Yshear, Yscale]
-    image_epsg: int
-        spatial reference system of the image from which the contours were extracted
-    settings: dict with the following keys
-        'output_epsg': int
+        contours: np.array or list of np.array
+            image contours as detected by the function find_contours
+        cloud_mask: np.array
+            2D cloud mask with True where cloud pixels are
+        im_nodata: np.array
+            2D mask with True where noData pixels are
+        georef: np.array
+            vector of 6 elements [Xtr, Xscale, Xshear, Ytr, Yshear, Yscale]
+        image_epsg: int
+            spatial reference system of the image from which the contours were extracted
+        settings: dict
+            contains the following fields:
+        output_epsg: int
             output spatial reference system
-        'min_length_sl': float
-            minimum length of shoreline contour to be kept (in meters)
+        min_length_sl: float
+            minimum length of shoreline perimeter to be kept (in meters)
+        dist_clouds: int
+            distance in metres defining a buffer around cloudy pixels where the shoreline cannot be mapped
 
-    Returns:
+    Returns:    
     -----------
-    shoreline: np.array
-        array of points with the X and Y coordinates of the shoreline
+        shoreline: np.array
+            array of points with the X and Y coordinates of the shoreline
 
     """
 
@@ -666,10 +675,10 @@ def process_shoreline(contours, cloud_mask, georef, image_epsg, settings):
         x_points = np.append(x_points,contours_long[k][:,0])
         y_points = np.append(y_points,contours_long[k][:,1])
     contours_array = np.transpose(np.array([x_points,y_points]))
-
+    
     shoreline = contours_array
-
-    # now remove any shoreline points that are attached to cloud pixels
+    
+    # now remove any shoreline points that are close to cloud pixels (effect of shadows)
     if sum(sum(cloud_mask)) > 0:
         # get the coordinates of the cloud pixels
         idx_cloud = np.where(cloud_mask)
@@ -680,11 +689,148 @@ def process_shoreline(contours, cloud_mask, georef, image_epsg, settings):
         # only keep the shoreline points that are at least 30m from any cloud pixel
         idx_keep = np.ones(len(shoreline)).astype(bool)
         for k in range(len(shoreline)):
+            if np.any(np.linalg.norm(shoreline[k,:] - coords_cloud, axis=1) < settings['dist_clouds']):
+                idx_keep[k] = False     
+        shoreline = shoreline[idx_keep] 
+        
+    # now remove any shoreline points that are attached to nodata pixels
+    if sum(sum(im_nodata)) > 0:
+        # get the coordinates of the cloud pixels
+        idx_cloud = np.where(im_nodata)
+        idx_cloud = np.array([(idx_cloud[0][k], idx_cloud[1][k]) for k in range(len(idx_cloud[0]))])
+        # convert to world coordinates and same epsg as the shoreline points
+        coords_cloud = SDS_tools.convert_epsg(SDS_tools.convert_pix2world(idx_cloud, georef),
+                                               image_epsg, settings['output_epsg'])[:,:-1]
+        # only keep the shoreline points that are at least 30m from any nodata pixel
+        idx_keep = np.ones(len(shoreline)).astype(bool)
+        for k in range(len(shoreline)):
             if np.any(np.linalg.norm(shoreline[k,:] - coords_cloud, axis=1) < 30):
-                idx_keep[k] = False
-        shoreline = shoreline[idx_keep]
+                idx_keep[k] = False     
+        shoreline = shoreline[idx_keep] 
 
     return shoreline
+
+def qa_detections(output,settings):
+    
+    fp = settings['inputs']['filepath']
+    sitename = settings['inputs']['sitename']
+    
+    # resize all the classified images to a fixed size so that all pixels overlap
+    height = [_.shape[0] for _ in output['im_classif']]
+    width = [_.shape[1] for _ in output['im_classif']]
+    heights = height.copy(); widths = width.copy()
+    if len(np.unique(height)) == 1: height = height[0]
+    else:
+        counts = [sum(height == _) for _ in np.unique(height)]
+        height = np.unique(height)[np.argmax(counts)]    
+    if len(np.unique(width)) == 1: width = width[0]    
+    else:
+        counts = [sum(width == _) for _ in np.unique(width)]
+        width = np.unique(width)[np.argmax(counts)]
+    
+    # ignore images with completely different size
+    idx_skip_height = np.abs(np.array(heights) - height) > settings['prc_image']*height
+    idx_skip_width = np.abs(np.array(widths) - width) > settings['prc_image']*width
+    idx_skip = np.where(np.logical_or(idx_skip_height,idx_skip_width))[0]
+    
+    # format images to same height and width
+    for k in range(len(output['im_classif'])):
+        if k in idx_skip: continue
+        # group land and water classes together (land = 0 , water = 1)
+        output['im_classif'][k][output['im_classif'][k] == 1] = 0
+        output['im_classif'][k][np.logical_or(output['im_classif'][k] == 3,
+                                              output['im_classif'][k] == 2)] = 1
+        # resize
+        output['im_classif'][k] = transform.resize(output['im_classif'][k],
+                                                   (height, width), order=0,
+                                                    preserve_range=True,
+                                                    mode='constant')
+                    
+    # compute average probability of being land or water (can take some time)
+    im_av = np.empty((height,width))
+    for i in range(height):
+        for j in range(width):
+            pixel_values = []
+            for k in range(len(output['im_classif'])):
+                if (output['cloud_cover'][k] > 0.1) or (k in idx_skip):
+                    continue
+                pixel_values.append(output['im_classif'][k][i,j])
+            im_av[i,j] = np.nanmean(pixel_values)
+            
+    # only consider the part of the image with high confidence 
+    # (large probability of belonging to land or water)
+    im_bin = np.logical_or(im_av > 1-settings['prc_pixel'], im_av < settings['prc_pixel'])
+    # do not consider the edges as they can be boundary effects
+    im_bin[:,[0,-1]] = False
+    im_bin[[0,-1],:] = False
+    
+    # rearranges images in folders
+    source_folder = os.path.join(fp,sitename,'jpg_files','detection')
+    dest_folder1 = os.path.join(fp,sitename,'jpg_files','all_images')
+    dest_folder2 = os.path.join(fp,sitename,'jpg_files','rejected')
+    if not os.path.exists(dest_folder2): os.makedirs(dest_folder2)
+    # copy all detections to new folder
+    shutil.copytree(source_folder,dest_folder1)
+    # remove erroneous classifications
+    idx_remove = []
+    for k in range(len(output['im_classif'])):
+        # different size images
+        if k in idx_skip:
+            idx_remove.append(k)
+            # store rejected image
+            fn = output['filename'][k].split('_')[0] + '_' + output['filename'][k].split('_')[1] + '.jpg'
+            file1 = os.path.join(dest_folder1,fn)
+            file2 = os.path.join(dest_folder2,fn)
+            if os.path.exists(file1):
+                shutil.move(file1,file2)
+            continue
+        # calculate the difference
+        im_diff = np.abs(np.round(im_av)-output['im_classif'][k])
+        im_diff[~im_bin] = np.nan
+        # calculate the percentage of pixels that are different
+        prc_change = sum(sum(im_diff == 1))/sum(sum(im_bin))
+        if prc_change > settings['prc_image']:
+            # print('%.2f'%prc_change, end='..')
+            idx_remove.append(k)
+            # store rejected image
+            fn = output['filename'][k].split('_')[0] + '_' + output['filename'][k].split('_')[1] + '.jpg'
+            file1 = os.path.join(dest_folder1,fn)
+            file2 = os.path.join(dest_folder2,fn)
+            if os.path.exists(file1):
+                shutil.move(file1,file2)
+                
+    # print how many images were removed
+    print('%d / %d images different size'%(len(idx_skip),len(output['im_classif'])))
+    print('%d / %d images wrong classif'%(len(idx_remove)-len(idx_skip),len(output['im_classif'])))
+    print('%d%% images removed'%(100*len(idx_remove)/len(output['im_classif'])))
+    print('\nRejected images were saved in %s'%dest_folder2)
+    # save figure for visual QA
+    fig,ax = plt.subplots(1,2,figsize=(15,8),sharex=True,sharey=True,tight_layout=True)
+    ax[0].set(title='Land-Water probability')
+    ax[0].axis('off')
+    ims = ax[0].imshow(1-im_av, cmap='coolwarm') 
+    cb = plt.colorbar(ims, ax=ax[0])
+    ax[1].set(title='Dry/wet pixels')
+    ax[1].axis('off')
+    ax[1].imshow(im_bin, cmap='gray')
+    ax[1].text(0.01,0.99,'%d/%d'%(len(idx_remove),len(output['im_classif'])),ha='left',va='top',
+               transform=ax[1].transAxes, bbox=dict(boxstyle="square", ec='k',fc='w'))
+    fp_fig = os.path.join(settings['inputs']['filepath'],settings['inputs']['sitename'], 'classif_qa.jpg')
+    fig.savefig(fp_fig, dpi=200)
+    print('Mean clasification image was saved in %s'%fp_fig)
+            
+    # clean up output dict (storing the classified image takes up a lot of space)
+    output.pop('im_classif')
+    idx_all = np.linspace(0, len(output['dates'])-1, len(output['dates']))
+    idx_keep = list(np.where(~np.isin(idx_all,idx_remove))[0])        
+    for key in output.keys():
+        output[key] = [output[key][_] for _ in idx_keep]
+    # store output
+    filepath = os.path.join(fp, sitename)
+    with open(os.path.join(filepath, sitename + '_output' + '.pkl'), 'wb') as f:
+        pickle.dump(output,f) 
+    
+    return output
 
 ###################################################################################################
 # PLOTTING FUNCTIONS

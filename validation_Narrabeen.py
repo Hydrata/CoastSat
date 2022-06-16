@@ -39,7 +39,7 @@ polygon = SDS_tools.smallest_rectangle(polygon)
 dates = ['1984-12-01', '2022-01-01']
 
 # satellite missions
-sat_list = ['L5','L7','L8','S2']
+sat_list = ['L5','L7','L8']
 collection = 'C01' # choose Landsat collection 'C01' or 'C02'
 # name of the site
 sitename = 'NARRA'
@@ -58,7 +58,7 @@ inputs = {
         }
 
 # before downloading the images, check how many images are available for your inputs
-SDS_download.check_images_available(inputs);
+# SDS_download.check_images_available(inputs);
 
 #%% 2. Retrieve images
 
@@ -70,22 +70,24 @@ metadata = SDS_download.retrieve_images(inputs)
 
 # if you have already downloaded the images, just load the metadata file
 metadata = SDS_download.get_metadata(inputs) 
+metadata.pop('S2')
 
 #%% 3. Batch shoreline detection
     
 # settings for the shoreline extraction
 settings = { 
     # general parameters:
-    'cloud_thresh': 0.5,        # threshold on maximum cloud cover
-    'output_epsg': 3857,        # epsg code of spatial reference system desired for the output   
+    'cloud_thresh': 0.1,        # threshold on maximum cloud cover
+    'dist_clouds': 300,         # buffer around cloud pixels where no shoreline can be detected
+    'output_epsg': 28356,        # epsg code of spatial reference system desired for the output   
     # quality control:
-    'check_detection': True,    # if True, shows each shoreline detection to the user for validation
+    'check_detection': False,    # if True, shows each shoreline detection to the user for validation
     'adjust_detection': False,  # if True, allows user to adjust the postion of each shoreline by changing the threhold
     'save_figure': True,        # if True, saves a figure showing the mapped shoreline for each image
     # [ONLY FOR ADVANCED USERS] shoreline detection parameters:
-    'min_beach_area': 4500,     # minimum area (in metres^2) for an object to be labelled as a beach
+    'min_beach_area': 1000,     # minimum area (in metres^2) for an object to be labelled as a beach
     'buffer_size': 150,         # radius (in metres) of the buffer around sandy pixels considered in the shoreline detection
-    'min_length_sl': 200,       # minimum length (in metres) of shoreline perimeter to be valid
+    'min_length_sl': 500,       # minimum length (in metres) of shoreline perimeter to be valid
     'cloud_mask_issue': False,  # switch this parameter to True if sand pixels are masked (in black) on many images  
     'sand_color': 'default',    # 'default', 'dark' (for grey/black sand beaches) or 'bright' (for white sand beaches)
     # add the inputs defined previously
@@ -93,7 +95,7 @@ settings = {
 }
 
 # [OPTIONAL] preprocess images (cloud masking, pansharpening/down-sampling)
-SDS_preprocess.save_jpg(metadata, settings)
+# SDS_preprocess.save_jpg(metadata, settings)
 
 # [OPTIONAL] create a reference shoreline (helps to identify outliers and false detections)
 settings['reference_shoreline'] = SDS_preprocess.get_reference_sl(metadata, settings)
@@ -235,25 +237,14 @@ output = SDS_tools.remove_duplicates(output)
 output = SDS_tools.remove_inaccurate_georef(output, 10)
 
 # for GIS applications, save output into a GEOJSON layer
-geomtype = 'lines' # choose 'points' or 'lines' for the layer geometry
+geomtype = 'points' # choose 'points' or 'lines' for the layer geometry
 gdf = SDS_tools.output_to_gdf(output, geomtype)
 gdf.crs = {'init':'epsg:'+str(settings['output_epsg'])} # set layer projection
+# conver to WGS84 (standard for GeoJSON)
+gdf.to_crs(epsg=4326,inplace=True)
 # save GEOJSON layer to file
 gdf.to_file(os.path.join(inputs['filepath'], inputs['sitename'], '%s_output_%s.geojson'%(sitename,geomtype)),
                                 driver='GeoJSON', encoding='utf-8')
-
-# plot the mapped shorelines
-plt.ion()
-fig = plt.figure(figsize=[15,8], tight_layout=True)
-plt.axis('equal')
-plt.xlabel('Eastings')
-plt.ylabel('Northings')
-plt.grid(linestyle=':', color='0.5')
-for i in range(len(output['shorelines'])):
-    sl = output['shorelines'][i]
-    date = output['dates'][i]
-    plt.plot(sl[:,0], sl[:,1], '.', label=date.strftime('%d-%m-%Y'))
-plt.legend() 
 
 # load the transects from a .geojson file
 geojson_file = os.path.join(os.getcwd(), 'examples', 'NARRA_transects.geojson')
@@ -274,17 +265,9 @@ for i,key in enumerate(list(transects.keys())):
     plt.plot(transects[key][:,0],transects[key][:,1],'k-',lw=1)
     plt.text(transects[key][0,0]-100, transects[key][0,1]+100, key,
                 va='center', ha='right', bbox=dict(boxstyle="square", ec='k',fc='w'))
+fig.savefig(os.path.join(inputs['filepath'],inputs['sitename'],'mapped_shorelines.jpg'),dpi=200)
 
-# load the measured tide data
-filepath = os.path.join(os.getcwd(),'examples','NARRA_tides.csv')
-tide_data = pd.read_csv(filepath, parse_dates=['dates'])
-dates_ts = [_.to_pydatetime() for _ in tide_data['dates']]
-tides_ts = np.array(tide_data['tide'])
-# get tide levels corresponding to the time of image acquisition
-dates_sat = output['dates']
-tides_sat = SDS_tools.get_closest_datapoint(dates_sat, dates_ts, tides_ts)
-
-# intersect the transects with the 2D shorelines to obtain time-series of cross-shore distance
+# # intersect the transects with the 2D shorelines to obtain time-series of cross-shore distance
 settings_transects = { # parameters for shoreline intersections
                       'along_dist':         25,             # along-shore distance to use for intersection
                       'max_std':            15,             # max std for points around transect
@@ -293,58 +276,59 @@ settings_transects = { # parameters for shoreline intersections
                       # parameters for outlier removal
                       'nan/max':            'auto',         # mode for removing outliers ('auto', 'nan', 'max')
                       'prc_std':            0.1,            # percentage to use in 'auto' mode to switch from 'nan' to 'max'
+                      'otsu_threshold':     [-.5,0],        # min and max intensity threshold use for contouring the shoreline
                       'max_cross_change':   40,             # two values of max_cross_change distance to use
-                      'plot_fig':           False,          # whether to plot the intermediate steps
+                      'plot_fig':           False,           # whether to plot the intermediate steps
                       }
+# sett1 = {'along_dist': 25, 'max_std':15, 'max_range':30, 'nan/max':'nan', 'max_threshold':0, 'max_cross_change':50}
 cross_distance = SDS_transects.compute_intersection(output, transects, settings_transects) 
 
-# tidal correction along each transect
-reference_elevation = 0.7 # elevation at which you would like the shoreline time-series to be
-beach_slope = 0.1
-cross_distance_tidally_corrected = {}
+# load the modelled tides
+tide_file = os.path.join(os.getcwd(), 'examples', 'NARRA_tides.csv')
+tide_data = pd.read_csv(tide_file, parse_dates=['dates'])
+dates_ts = [_.to_pydatetime() for _ in tide_data['dates']]
+dates_ts = [pytz.utc.localize(_) for _ in dates_ts]
+tides_ts = np.array(tide_data['tides'])
+# get tide levels corresponding to the time of image acquisition
+dates_sat = output['dates']
+tides_sat = SDS_tools.get_closest_datapoint(dates_sat, dates_ts, tides_ts)
+
+# plot the subsampled tide data
+fig, ax = plt.subplots(1,1,figsize=(15,4), tight_layout=True)
+ax.grid(which='major', linestyle=':', color='0.5')
+ax.plot(tide_data['dates'], tide_data['tides'], '-', color='0.6', label='all time-series')
+ax.plot(dates_sat, tides_sat, '-o', color='k', ms=6, mfc='w',lw=1, label='image acquisition')
+ax.set(ylabel='tide level [m]',xlim=[dates_sat[0],dates_sat[-1]], title='Water levels at the time of image acquisition');
+ax.legend()
+
+# apply tidal correction
+beach_slope = 0.1           # estimate of the beach-face slope
+reference_elevation = 0.7   # elevation at which you would like the shoreline time-series to be
+cross_distance_corrected = {}
 for key in cross_distance.keys():
     correction = (tides_sat-reference_elevation)/beach_slope
-    cross_distance_tidally_corrected[key] = cross_distance[key] + correction
+    cross_distance_corrected[key] = cross_distance[key] + correction
     
-# remove outliers
-cross_distance = SDS_transects.reject_outliers(cross_distance_tidally_corrected,output,settings_transects) 
-
+# remove outliers in the time-series (despiking)
+cross_distance = SDS_transects.reject_outliers(cross_distance_corrected,output,settings_transects)
+    
 # store the tidally-corrected time-series in a .csv file
 out_dict = dict([])
 out_dict['dates'] = dates_sat
-for key in cross_distance_tidally_corrected.keys():
-    out_dict['Transect '+ key] = cross_distance_tidally_corrected[key]
+for key in cross_distance.keys():
+    out_dict['Transect '+ key] = cross_distance[key]
 df = pd.DataFrame(out_dict)
 fn = os.path.join(settings['inputs']['filepath'],settings['inputs']['sitename'],
                   'transect_time_series_tidally_corrected.csv')
 df.to_csv(fn, sep=',')
 print('Tidally-corrected time-series of the shoreline change along the transects saved as:\n%s'%fn)
-
-# plot the time-series
-fig = plt.figure(figsize=[15,8], tight_layout=True)
-gs = gridspec.GridSpec(len(cross_distance),1)
-gs.update(left=0.05, right=0.95, bottom=0.05, top=0.95, hspace=0.05)
-for i,key in enumerate(cross_distance_tidally_corrected.keys()):
-    if np.all(np.isnan(cross_distance_tidally_corrected[key])):
-        continue
-    ax = fig.add_subplot(gs[i,0])
-    ax.grid(linestyle=':', color='0.5')
-    ax.set_ylim([-50,50])
-    median = np.nanmedian(cross_distance_tidally_corrected[key])
-    ax.plot(output['dates'],
-            cross_distance_tidally_corrected[key]-median,
-            '-o', ms=6, mfc='w')
-    ax.set_ylabel('distance [m]', fontsize=12)
-    ax.text(0.5,0.95, key, bbox=dict(boxstyle="square", ec='k',fc='w'), ha='center',
-            va='top', transform=ax.transAxes, fontsize=14) 
     
 #%% 5. Comparison to groundtruth
 
 # load groundtruth
 filepath = os.path.join(os.getcwd(), 'examples')
-with open(os.path.join(filepath, 'NARRA_groundtruth_07m' + '.pkl'), 'rb') as f:
+with open(os.path.join(filepath, 'NARRA_groundtruth_07m_b' + '.pkl'), 'rb') as f:
     gt = pickle.load(f)
-    
 # convert timezone
 for key in gt.keys():
     gt[key]['dates'] = [_.astimezone(pytz.utc) for _ in gt[key]['dates']]
@@ -469,7 +453,7 @@ for key in transects.keys():
     str_stats = ' rmse = %.1f\n mean = %.1f\n std = %.1f\n q90 = %.1f' % (rmse, mean, std, q90) 
     ax3.text(0, 0.98, str_stats,va='top', transform=ax3.transAxes)
     
-    fig.savefig('transect_' + key + '.jpg', dpi=150)
+    # fig.savefig('transect_' + key + '.jpg', dpi=150)
     
 # calculate statistics for all transects together
 chain_error = chain_sat_all - chain_sur_all        
@@ -516,5 +500,5 @@ for j,boxes in enumerate(bp['boxes']):
     ax[1].text(j+1+0.35,median_data[j]+1, ('n=%.d' % int(n_data[j])), ha='center', va='center', fontsize=8, rotation='vertical')
 ax[1].set(ylabel='error [m]', ylim=sett['lims'])
 
-fig.savefig('all_transects_stats' + '.jpg', dpi=150)
+# fig.savefig('all_transects_stats' + '.jpg', dpi=150)
 

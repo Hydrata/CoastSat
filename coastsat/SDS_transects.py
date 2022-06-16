@@ -446,7 +446,7 @@ def reject_outliers(cross_distance, output, settings):
             chainage2 = chainage1
             dates2 = dates1
         else:
-            threshold1 = [output['threshold'][k] for k in idx_nonan]
+            threshold1 = [output['MNDWI_threshold'][k] for k in idx_nonan]
             idx_thres = np.where(np.logical_and(np.array(threshold1) <= settings['otsu_threshold'][1],
                                                 np.array(threshold1) >= settings['otsu_threshold'][0]))[0]
             chainage2 = [chainage1[k] for k in idx_thres]
