@@ -325,9 +325,12 @@ print('Tidally-corrected time-series of the shoreline change along the transects
     
 #%% 5. Comparison to groundtruth
 
+fp_save = os.path.join(os.getcwd(),'figs','run_v4')
+if not os.path.exists(fp_save): os.makedirs(fp_save)
+
 # load groundtruth
 filepath = os.path.join(os.getcwd(), 'examples')
-with open(os.path.join(filepath, 'NARRA_groundtruth_07m_b' + '.pkl'), 'rb') as f:
+with open(os.path.join(filepath, 'NARRA_groundtruth_07m' + '.pkl'), 'rb') as f:
     gt = pickle.load(f)
 # convert timezone
 for key in gt.keys():
@@ -432,8 +435,8 @@ for key in transects.keys():
         median.set(color='k', linewidth=1.5)
     for j,boxes in enumerate(bp['boxes']):
         boxes.set(facecolor='C'+str(j))
-        ax2.text(j+1,median_data[j]+1, '%.1f' % median_data[j], horizontalalignment='center', fontsize=8)
-        ax2.text(j+1+0.35,median_data[j]+1, ('n=%.d' % int(n_data[j])), ha='center', va='center', fontsize=8, rotation='vertical')
+        ax2.text(j+1,median_data[j]+1, '%.1f' % median_data[j], horizontalalignment='center', fontsize=12)
+        ax2.text(j+1+0.35,median_data[j]+1, ('n=%.d' % int(n_data[j])), ha='center', va='center', fontsize=12, rotation='vertical')
     ax2.set(ylabel='error [m]', ylim=sett['lims'])
     
     # histogram
@@ -453,7 +456,7 @@ for key in transects.keys():
     str_stats = ' rmse = %.1f\n mean = %.1f\n std = %.1f\n q90 = %.1f' % (rmse, mean, std, q90) 
     ax3.text(0, 0.98, str_stats,va='top', transform=ax3.transAxes)
     
-    # fig.savefig('transect_' + key + '.jpg', dpi=150)
+    fig.savefig(os.path.join(fp_save,'transect_' + key + '.jpg'), dpi=150)
     
 # calculate statistics for all transects together
 chain_error = chain_sat_all - chain_sur_all        
@@ -496,9 +499,8 @@ for median in bp['medians']:
     median.set(color='k', linewidth=1.5)
 for j,boxes in enumerate(bp['boxes']):
     boxes.set(facecolor='C'+str(j))
-    ax[1].text(j+1,median_data[j]+1, '%.1f' % median_data[j], horizontalalignment='center', fontsize=8)
-    ax[1].text(j+1+0.35,median_data[j]+1, ('n=%.d' % int(n_data[j])), ha='center', va='center', fontsize=8, rotation='vertical')
+    ax[1].text(j+1,median_data[j]+1, '%.1f' % median_data[j], horizontalalignment='center', fontsize=12)
+    ax[1].text(j+1+0.35,median_data[j]+1, ('n=%.d' % int(n_data[j])), ha='center', va='center', fontsize=12, rotation='vertical')
 ax[1].set(ylabel='error [m]', ylim=sett['lims'])
 
-# fig.savefig('all_transects_stats' + '.jpg', dpi=150)
-
+fig.savefig(os.path.join(fp_save,'all_transects_stats' + '.jpg'), dpi=150)
