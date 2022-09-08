@@ -1,0 +1,7 @@
+earthengine-api==0.1.236
+geopandas==0.11.0
+scikit-image==0.19.3
+PyQt5==5.15.7
+scikit-learn==1.1.1
+astropy==5.1
+typing-extensions==4.3.0
